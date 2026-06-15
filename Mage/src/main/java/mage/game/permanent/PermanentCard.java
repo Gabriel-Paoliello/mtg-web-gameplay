@@ -1,0 +1,310 @@
+package mage.game.permanent;
+
+import mage.MageObject;
+import mage.ObjectColor;
+import mage.abilities.Abilities;
+import mage.abilities.Ability;
+import mage.abilities.common.RoomAbility;
+import mage.abilities.costs.mana.ManaCost;
+import mage.abilities.costs.mana.ManaCosts;
+import mage.cards.*;
+import mage.constants.SpellAbilityType;
+import mage.game.Game;
+import mage.game.events.ZoneChangeEvent;
+import mage.players.Player;
+
+import java.util.UUID;
+
+/**
+ * Static permanent on the battlefield. There are possible multiple permanents per one card,
+ * so be carefully for targets (ids are different) and ZCC (zcc is static for permanent).
+ *
+ * @author BetaSteward_at_googlemail.com
+ */
+public class PermanentCard extends PermanentImpl {
+
+    // blueprint e.g. a copy of the original card that was cast
+    // (this is not the original card, so it's possible to change some attribute before it enters the battlefield)
+    // TODO: wtf, it modified on getCard/getBasicMageObject/getMainCard() and other places, e.g. on bestow -- must be fixed!
+    protected Card card;
+
+    protected int maxLevelCounters;
+    protected int zoneChangeCounter;
+    protected ObjectColor originalColor;
+    protected ObjectColor originalFrameColor;
+
+    public PermanentCard(Card card, UUID controllerId, Game game) {
+        super(card.getId(), card.getOwnerId(), controllerId, card.getName()); // card id
+        // TODO: wtf, must research - is it possible to have diff ids for same card id?!
+        //  ETB with counters depends on card id, not permanent id
+        // TODO: ETB with counters works with tokens?! Must research
+
+        // runtime check: must use real card only inside
+        if (card instanceof PermanentCard) {
+            throw new IllegalArgumentException("Wrong code usage: can't use PermanentCard inside another PermanentCard");
+        }
+
+        // usage check: you must put to play only real card's part
+        // if you use it in test code or for permanent's copy effects then call CardUtil.getDefaultCardSideForBattlefield for default side
+        // it's a basic check and still allows to create permanent from instant or sorcery
+        boolean goodForBattlefield = true;
+        if (card instanceof DoubleFacedCard) {
+            goodForBattlefield = false;
+        } else if (card instanceof SplitCard) {
+            // fused spells allowed (it uses main card)
+            // room spells allowed (it uses main card)
+            if (card.getSpellAbility() != null && !card.getSpellAbility().getSpellAbilityType().equals(SpellAbilityType.SPLIT_FUSED) && !(card instanceof RoomCard)) {
+                goodForBattlefield = false;
+            }
+        }
+
+        // face down cards allows in any forms (only face up restricted for non-permanents)
+        if (card.isFaceDown(game)) {
+            goodForBattlefield = true;
+        }
+
+        if (!goodForBattlefield) {
+            throw new IllegalArgumentException("Wrong code usage: can't create permanent card from split or mdf: " + card.getName());
+        }
+
+        // if two permanent sides, set front and second side
+        if (card instanceof DoubleFacedCardHalf && card.isPermanent() && ((DoubleFacedCardHalf) card).getOtherSide().isPermanent()) {
+            if (((DoubleFacedCardHalf) card).isBackSide()) {
+                secondSideCard = card;
+                this.card = ((DoubleFacedCardHalf) card).getOtherSide().copy();
+                this.transformed = true;
+                init(secondSideCard, game);
+            } else {
+                secondSideCard = ((DoubleFacedCardHalf) card).getOtherSide().copy();
+                this.card = card;
+                init(card, game);
+            }
+        } else {
+            this.card = card;
+            init(card, game);
+        }
+
+        this.zoneChangeCounter = card.getZoneChangeCounter(game); // local value already set to the raised number
+    }
+
+    private void init(Card card, Game game) {
+        power = card.getPower().copy();
+        toughness = card.getToughness().copy();
+        startingLoyalty = card.getStartingLoyalty();
+        startingDefense = card.getStartingDefense();
+        copyFromCard(card, game, false);
+        // if temporary added abilities to the spell/card exist, you need to add it to the permanent derived from that card
+        Abilities<Ability> otherAbilities = game.getState().getAllOtherAbilities(card.getId());
+        if (otherAbilities != null) {
+            abilities.addAll(otherAbilities);
+        }
+        if (card instanceof LevelerCard) {
+            maxLevelCounters = ((LevelerCard) card).getMaxLevelCounters();
+        }
+    }
+
+    protected PermanentCard(final PermanentCard permanent) {
+        super(permanent);
+        this.card = permanent.card.copy();
+        this.maxLevelCounters = permanent.maxLevelCounters;
+        this.zoneChangeCounter = permanent.zoneChangeCounter;
+        this.originalColor = permanent.originalColor.copy();
+        this.originalFrameColor = permanent.originalFrameColor.copy();
+    }
+
+    @Override
+    public void reset(Game game) {
+        // when the permanent is reset, copy all original values from the card
+        // must copy card each reset so that the original values don't get modified
+        if (transformed && secondSideCard != null && getCard() instanceof DoubleFacedCardHalf) {
+            copyFromCard(secondSideCard, game, true);
+        } else {
+            copyFromCard(card, game, true);
+        }
+        applyMutate(game);
+        power.resetToBaseValue();
+        toughness.resetToBaseValue();
+        super.reset(game);
+    }
+
+    @Override
+    protected void initOtherFace(Game game) {
+        if (!(secondSideCard instanceof DoubleFacedCardHalf)) {
+            return;
+        }
+        if (transformed) {
+            copyFromCard(secondSideCard, game, false);
+        } else {
+            copyFromCard(card, game, false);
+        }
+    }
+
+    protected void copyFromCard(final Card card, final Game game, boolean isReset) {
+        // TODO: must research - is it copy all fields or something miss
+        this.name = card.getName();
+        this.abilities.clear();
+        if (this.faceDown) {
+            for (Ability ability : card.getAbilities()) {
+                if (ability.getWorksFaceDown()) {
+                    this.abilities.add(ability.copy());
+                }
+            }
+        } else if (card.getId() != this.getId()) {
+            // if different id, abilities need to be added to game state for continuous/triggers
+            for (Ability ability : card.getAbilities()) {
+                this.addAbility(ability, card.getId(), game, true);
+            }
+        } else {
+            // copy only own abilities; all dynamic added abilities must be added in the parent call
+            this.abilities = card.getAbilities().copy();
+            this.spellAbility = null; // will be set on first getSpellAbility call if card has one.
+        }
+        this.abilities.setControllerId(this.controllerId);
+        this.abilities.setSourceId(objectId);
+        this.cardType.clear();
+        this.cardType.addAll(card.getCardType());
+        if (!isReset) {
+            // save color from game state on first creation
+            this.color = card.getColor(game).copy();
+            this.frameColor = card.getFrameColor(game).copy();
+            this.originalColor = card.getColor(game).copy();
+            this.originalFrameColor = card.getFrameColor(game).copy();
+        } else {
+            this.color = originalColor.copy();
+            this.frameColor = originalFrameColor.copy();
+        }
+        this.frameStyle = card.getFrameStyle();
+        this.manaCost = card.getManaCost().copy();
+        if (card instanceof PermanentCard) {
+            this.maxLevelCounters = ((PermanentCard) card).maxLevelCounters;
+        }
+        this.power = card.getPower().copy();
+        this.toughness = card.getToughness().copy();
+        this.subtype.copyFrom(card.getSubtype());
+        this.supertype.clear();
+        this.supertype.addAll(card.getSuperType());
+        this.rarity = card.getRarity();
+
+        this.setExpansionSetCode(card.getExpansionSetCode());
+        this.setUsesVariousArt(card.getUsesVariousArt());
+        this.setCardNumber(card.getCardNumber());
+        this.setImageFileName(card.getImageFileName());
+        this.setImageNumber(card.getImageNumber());
+
+        if (card.getMeldsToCard() != null) {
+            this.meldsToClazz = card.getMeldsToCard().getClass();
+        }
+        this.nightCard = card.isNightCard();
+        this.flipCard = card.isFlipCard();
+        this.flipCardName = card.getFlipCardName();
+        // Rooms set characteristics at the end so nothing gets overwritten
+        if (card instanceof RoomCard) {
+            RoomCard.setRoomCharacteristics(this, game);
+            if (!isReset) {
+                RoomAbility roomAbility = null;
+                for (Ability ability : this.abilities) {
+                    if (ability instanceof RoomAbility) {
+                        roomAbility = (RoomAbility) ability;
+                        break;
+                    }
+                }
+                if (roomAbility != null) {
+                    roomAbility.applyCharacteristics(game, this);
+                }
+            }
+        }
+    }
+
+    @Override
+    public MageObject getBasicMageObject() {
+        return card;
+    }
+
+    public Card getCard() {
+        return card;
+    }
+
+    @Override
+    public PermanentCard copy() {
+        return new PermanentCard(this);
+    }
+
+    public int getMaxLevelCounters() {
+        return this.maxLevelCounters;
+    }
+
+    @Override
+    public boolean turnFaceUp(Ability source, Game game, UUID playerId) {
+        if (!this.getBasicMageObject().isPermanent()) {
+            // 701.34g. If a manifested permanent that's represented by an instant or sorcery card would turn face up,
+            //   its controller reveals it and leaves it face down. Abilities that trigger whenever a permanent
+            //   is turned face up won't trigger.
+            Player player = game.getPlayer(source.getControllerId());
+            if (player != null) {
+                player.revealCards(source, new CardsImpl(this), game);
+            }
+            return false;
+        }
+        if (super.turnFaceUp(source, game, playerId)) {
+            // TODO: miss types, abilities, color and other things for restore?!
+            power.setModifiedBaseValue(power.getBaseValue());
+            toughness.setModifiedBaseValue(toughness.getBaseValue());
+            setManifested(false);
+            setMorphed(false);
+            setDisguised(false);
+            setCloaked(false);
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public ManaCosts<ManaCost> getManaCost() {
+        if (faceDown) { // face down permanent has always {0} mana costs
+            manaCost.clear();
+            return manaCost;
+        }
+        return super.getManaCost();
+    }
+
+    @Override
+    public int getManaValue() {
+        if (isTransformed()) {
+            // 711.4b While a double-faced permanent's back face is up, it has only the characteristics of its back face.
+            // However, its converted mana cost is calculated using the mana cost of its front face. This is a change from previous rules.
+            // If a permanent is copying the back face of a double-faced card (even if the card representing that copy
+            // is itself a double-faced card), the converted mana cost of that permanent is 0.
+            return getCard().getManaValue();
+        }
+        if (faceDown) { // game not neccessary
+            return getManaCost().manaValue();
+        }
+        return super.getManaValue();
+
+    }
+
+    @Override
+    public int getZoneChangeCounter(Game game) {
+        // permanent value of zone change counter stays always the same without exception of update during the process of putting the permanent onto the battlefield
+        return zoneChangeCounter;
+    }
+
+    @Override
+    public void updateZoneChangeCounter(Game game, ZoneChangeEvent event) {
+        // TODO: wtf, permanent must not change ZCC at all, is it buggy here?!
+        card.updateZoneChangeCounter(game, event);
+        zoneChangeCounter = card.getZoneChangeCounter(game);
+    }
+
+    @Override
+    public void setZoneChangeCounter(int value, Game game) {
+        // TODO: wtf, why it sync card only without permanent zcc, is it buggy here?!
+        // TODO: miss zoneChangeCounter = card.getZoneChangeCounter(game); ?
+        card.setZoneChangeCounter(value, game);
+    }
+
+    @Override
+    public Card getMainCard() {
+        return card.getMainCard();
+    }
+}

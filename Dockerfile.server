@@ -1,0 +1,37 @@
+# Stage 1: Build with Maven
+FROM maven:3.9-eclipse-temurin-21 AS build
+
+WORKDIR /build
+
+# Copy root pom and all module sources
+COPY pom.xml .
+COPY Mage/ Mage/
+COPY Mage.Common/ Mage.Common/
+COPY Mage.Server/ Mage.Server/
+COPY Mage.Server.Plugins/ Mage.Server.Plugins/
+COPY Mage.Server.Console/ Mage.Server.Console/
+COPY Mage.Client/ Mage.Client/
+COPY Mage.Plugins/ Mage.Plugins/
+COPY Mage.Reports/ Mage.Reports/
+COPY Mage.Sets/ Mage.Sets/
+COPY Mage.Tests/ Mage.Tests/
+COPY Mage.Verify/ Mage.Verify/
+COPY Utils/ Utils/
+COPY repository/ repository/
+
+RUN mvn package -DskipTests -q
+
+# Stage 2: Minimal JRE runtime
+FROM eclipse-temurin:21-jre-alpine AS runtime
+
+WORKDIR /app
+
+# Copy the server jar and any required config/plugins
+COPY --from=build /build/Mage.Server/target/Mage.Server-*.jar ./Mage.Server.jar
+COPY --from=build /build/Mage.Server/config/ ./config/
+# Copy plugin jars if present
+COPY --from=build /build/Mage.Server.Plugins/ ./Mage.Server.Plugins/
+
+EXPOSE 8080
+
+ENTRYPOINT ["java", "-jar", "Mage.Server.jar"]

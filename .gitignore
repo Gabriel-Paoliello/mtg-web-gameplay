@@ -1,0 +1,70 @@
+syntax: glob
+
+# global files
+**/db
+**/saved
+**/target
+#un-ignore target implementations
+!Mage/src/main/java/mage/target
+
+# logs and logs rotation
+*.log
+*.log.*
+*/gamelogs
+*/gamelogsJson
+*/gamesHistory
+
+# Mage.Client
+Mage.Client/plugins/images
+Mage.Client/plugins/plugin.data
+# TODO: must save serverlist.txt to temporary files, not root folder
+Mage.Client/serverlist.txt
+
+# Mage.Server
+Mage.Server/config/init.txt
+Mage.Server/extensions
+
+# Mage.Verify
+# downloadable files
+Mage.Verify/*.zip
+Mage.Verify/*.json
+
+# Utils
+__pycache__
+Utils/*-scryfall.json
+# TODO: remove outdated files and scripts
+releases
+Utils/author.txt
+
+# TODO: remove with outdated perl scripts
+Utils/*_tracker.txt
+Utils/*implemented.txt
+
+# dev environments, IDE and OS
+# IntelliJ IDEA
+.idea
+*.iml
+# Visual Studio Code
+.vscode
+.history
+# Eclipse
+.metadata
+.project
+.settings
+.factorypath
+**/bin
+**/out
+# NetBeans
+**/nb-configuration.xml
+# Atom
+.build-tools.cson
+# mac os
+.DS_Store
+
+# build tools
+mage-bundle.zip
+.env
+
+# build targets
+/deploy
+/temp
