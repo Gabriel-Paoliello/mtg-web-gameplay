@@ -788,29 +788,99 @@ public class WebSocketGameServer extends WebSocketServlet {
 
         executor.schedule(() -> {
             try {
+                logger.info("[WS] scheduleGameJoinAndPoll: lambda started wsGameId=" + wsGameId + " tableId=" + tableId);
+
                 // Locate the XMage game UUID via the TableController -> Match -> Game
                 mage.server.TableController tc = mf.tableManager().getController(tableId).orElse(null);
                 if (tc == null) {
-                    logger.error("TableController not found for tableId=" + tableId);
+                    logger.error("[WS] TableController not found for tableId=" + tableId);
                     return;
                 }
                 mage.game.match.Match match = tc.getMatch();
                 if (match == null || match.getGame() == null) {
-                    logger.error("Match/Game not started for tableId=" + tableId);
+                    logger.error("[WS] Match/Game not started for tableId=" + tableId + " match=" + match);
                     return;
                 }
                 UUID xmageGameId = match.getGame().getId();
                 wsGameToXmageGame.put(wsGameId, xmageGameId);
+                logger.info("[WS] xmageGameId=" + xmageGameId + " for wsGameId=" + wsGameId);
 
                 // Join the game session for each human player (triggers GameController.join)
                 mf.gameManager().joinGame(xmageGameId, userId1);
+                logger.info("[WS] joinGame called for userId1=" + userId1);
                 if (userId2 != null) {
                     mf.gameManager().joinGame(xmageGameId, userId2);
+                    logger.info("[WS] joinGame called for userId2=" + userId2);
                 }
 
-                // Record player UUIDs from userPlayerMap (available via GameController)
-                // Give the game a moment to fully start
-                Thread.sleep(500);
+                // Wait for GameController to be created (startGame runs in callExecutor)
+                Thread.sleep(1500);
+
+                GameController gc = ApiServerModule.getGameController(xmageGameId);
+                logger.info("[WS] GameController=" + (gc != null ? "FOUND" : "NULL") + " xmageGameId=" + xmageGameId);
+                if (gc == null) {
+                    logger.warn("[WS] GameController not found — skipping auto-start responses");
+                } else {
+                    // Resolve XMage player UUIDs (needed for "choose starting player" response)
+                    UUID playerId1 = resolvePlayerIdForUser(gc, userId1, mf);
+                    UUID playerId2 = (userId2 != null) ? resolvePlayerIdForUser(gc, userId2, mf) : null;
+                    logger.info("[WS] playerId1=" + playerId1 + " playerId2=" + playerId2);
+
+                    // Auto-respond to game startup prompts using two parallel threads, one per
+                    // player. Each thread first sends a UUID (for "choose starting player") then
+                    // a Boolean false (for mulligan keep).
+                    //
+                    // The game asks only ONE player to choose the starting player (UUID prompt)
+                    // then asks BOTH players for mulligan (Boolean prompt).
+                    //
+                    // Both threads call sendPlayerUUIDDirect first. For the non-choosing player
+                    // the UUID call's waitResponseOpen() will return when the mulligan window
+                    // opens (any response-window triggers it). The game ignores the UUID on a
+                    // Boolean question and asks again; the thread immediately follows with the
+                    // Boolean, answering the repeated question correctly.
+                    final UUID startingPlayerId = (playerId1 != null) ? playerId1
+                            : (playerId2 != null ? playerId2 : null);
+
+                    final UUID finalUserId1 = userId1;
+                    final UUID finalUserId2 = userId2;
+                    final GameController finalGc = gc;
+
+                    Thread t1 = new Thread(() -> {
+                        try {
+                            logger.info("[WS-t1] sending UUID for starting player");
+                            finalGc.sendPlayerUUIDDirect(finalUserId1, startingPlayerId);
+                            logger.info("[WS-t1] UUID sent; sending keep (false) for mulligan");
+                            finalGc.sendPlayerBooleanDirect(finalUserId1, false);
+                            logger.info("[WS-t1] done");
+                        } catch (Exception e) {
+                            logger.warn("[WS-t1] error: " + e.getMessage(), e);
+                        }
+                    }, "ws-auto-p1-" + wsGameId);
+                    t1.setDaemon(true);
+
+                    Thread t2 = (finalUserId2 != null) ? new Thread(() -> {
+                        try {
+                            logger.info("[WS-t2] sending UUID for starting player");
+                            finalGc.sendPlayerUUIDDirect(finalUserId2, startingPlayerId);
+                            logger.info("[WS-t2] UUID sent; sending keep (false) for mulligan");
+                            finalGc.sendPlayerBooleanDirect(finalUserId2, false);
+                            logger.info("[WS-t2] done");
+                        } catch (Exception e) {
+                            logger.warn("[WS-t2] error: " + e.getMessage(), e);
+                        }
+                    }, "ws-auto-p2-" + wsGameId) : null;
+                    if (t2 != null) t2.setDaemon(true);
+
+                    t1.start();
+                    if (t2 != null) t2.start();
+
+                    // Wait up to 65 s for both threads (30s UUID wait + 30s Boolean wait + 5s buffer)
+                    t1.join(65000);
+                    if (t2 != null) t2.join(65000);
+                    logger.info("[WS] auto-start threads finished for wsGameId=" + wsGameId);
+                }
+
+                logger.info("[WS] Starting polling loop for wsGameId=" + wsGameId);
 
                 // Start polling loop
                 final UUID finalXmageGameId = xmageGameId;
@@ -818,12 +888,12 @@ public class WebSocketGameServer extends WebSocketServlet {
                     try {
                         pollAndPush(mf, wsGameId, finalXmageGameId);
                     } catch (Exception e) {
-                        logger.warn("Polling error for wsGameId=" + wsGameId + ": " + e.getMessage());
+                        logger.warn("Polling error for wsGameId=" + wsGameId + ": " + e.getMessage(), e);
                     }
                 }, 0, POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
 
             } catch (Exception e) {
-                logger.error("Error during game join/poll setup for wsGameId=" + wsGameId, e);
+                logger.error("[WS] Error during game join/poll setup for wsGameId=" + wsGameId, e);
             }
         }, 1000, TimeUnit.MILLISECONDS);
     }
@@ -831,8 +901,16 @@ public class WebSocketGameServer extends WebSocketServlet {
     /**
      * Poll game state for all players of a given game and push to their WS sessions.
      */
+    // Throttle pollAndPush debug logs to avoid log spam (log every ~10 seconds)
+    private static final java.util.concurrent.atomic.AtomicLong pollLogCounter = new java.util.concurrent.atomic.AtomicLong();
+
     private static void pollAndPush(ManagerFactory mf, UUID wsGameId, UUID xmageGameId) {
         GameController gc = ApiServerModule.getGameController(xmageGameId);
+        long pollCount = pollLogCounter.incrementAndGet();
+        if (pollCount <= 3 || pollCount % 20 == 0) {
+            logger.info("[WS] pollAndPush #" + pollCount + " wsGameId=" + wsGameId
+                    + " gc=" + (gc != null ? "FOUND" : "NULL"));
+        }
         if (gc == null) {
             // Game ended or not yet started
             return;
@@ -848,10 +926,12 @@ public class WebSocketGameServer extends WebSocketServlet {
             // Get the player UUID for this user
             UUID playerId = userPlayerIdMap.get(userId);
             if (playerId == null) {
-                // Try to resolve playerId by looking through GameController's game sessions
                 playerId = resolvePlayerIdForUser(gc, userId, mf);
                 if (playerId != null) {
                     userPlayerIdMap.put(userId, playerId);
+                    logger.info("Resolved playerId=" + playerId + " for userId=" + userId);
+                } else {
+                    logger.warn("Cannot resolve playerId for userId=" + userId + " wsGameId=" + wsGameId);
                 }
             }
             if (playerId == null) continue;

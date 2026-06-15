@@ -801,6 +801,40 @@ public class GameController implements GameCallback {
         sendMessage(userId, playerId -> sendDirectPlayerBoolean(playerId, data));
     }
 
+    /**
+     * Send a boolean response directly to a player's session, bypassing the
+     * priority check in {@link #sendMessage}.  The underlying
+     * {@code sendPlayerBoolean} on the session still calls
+     * {@code waitResponseOpen()}, which blocks until the game thread actually
+     * opens a response window, so early calls are safe.
+     *
+     * This is used by the WebSocket bridge to auto-answer prompts (e.g.
+     * mulligan keep) where the WS client does not have the usual priority
+     * signal telling it when to send the response.
+     */
+    public void sendPlayerBooleanDirect(UUID userId, final Boolean data) {
+        final UUID playerId = userPlayerMap.get(userId);
+        if (playerId == null) return;
+        GameSessionPlayer session = getGameSession(playerId);
+        if (session != null) {
+            session.sendPlayerBoolean(data);
+        }
+    }
+
+    /**
+     * Send a UUID response directly to a player's session, bypassing the
+     * priority check in {@link #sendMessage}.  Used by the WebSocket bridge
+     * to auto-answer "choose starting player" UUID prompts.
+     */
+    public void sendPlayerUUIDDirect(UUID userId, final UUID data) {
+        final UUID playerId = userPlayerMap.get(userId);
+        if (playerId == null) return;
+        GameSessionPlayer session = getGameSession(playerId);
+        if (session != null) {
+            session.sendPlayerUUID(data);
+        }
+    }
+
     public void sendPlayerInteger(UUID userId, final Integer data) {
         sendMessage(userId, playerId -> sendDirectPlayerInteger(playerId, data));
     }
