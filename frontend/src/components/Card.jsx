@@ -1,13 +1,15 @@
 import React, { useState, useRef, useCallback } from 'react'
 
 // Scryfall image URL builder
-// scryfallId expected; falls back to name search if not provided
 function buildImageUrl(card) {
   if (card.scryfallId) {
     const id = card.scryfallId
     return `https://cards.scryfall.io/normal/front/${id[0]}/${id[1]}/${id}.jpg`
   }
-  // Fallback: Scryfall named search redirect (won't work as <img src> directly, used as placeholder)
+  // Scryfall named search returns a redirect directly to the card image
+  if (card.name) {
+    return `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}&format=image&version=normal`
+  }
   return null
 }
 

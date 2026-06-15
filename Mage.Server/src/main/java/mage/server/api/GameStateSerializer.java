@@ -8,8 +8,12 @@ import java.util.*;
 
 /**
  * Serializes XMage GameView / PlayerView objects to a JSON structure suitable
- * for WebSocket clients.  Only view objects are read – the live Game object is
- * never touched here.
+ * for WebSocket clients.
+ *
+ * serialize() now accepts the local player UUID so that:
+ *  - The local player's hand is returned as full card objects.
+ *  - Opponents' hands are returned as face-down placeholder objects.
+ *  - The root includes myPlayerId, priorityPlayerId, and canPlayIds.
  */
 public final class GameStateSerializer {
 
@@ -17,11 +21,12 @@ public final class GameStateSerializer {
 
     private GameStateSerializer() {}
 
-    /**
-     * Build a plain Map tree from a GameView so it can be serialized to JSON
-     * without pulling in every Serializable implementation detail.
-     */
-    public static String serialize(UUID gameId, String format, GameView view) {
+    public static String serialize(UUID gameId, String format, GameView view, UUID localPlayerId) {
+        return serialize(gameId, format, view, localPlayerId, null);
+    }
+
+    public static String serialize(UUID gameId, String format, GameView view,
+                                   UUID localPlayerId, Map<String, Object> pendingQuery) {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("gameId", gameId != null ? gameId.toString() : null);
         root.put("format", format);
@@ -31,30 +36,65 @@ public final class GameStateSerializer {
         root.put("activePlayerId", view.getActivePlayerId() != null ? view.getActivePlayerId().toString() : null);
         root.put("activePlayerName", view.getActivePlayerName());
         root.put("priorityPlayerName", view.getPriorityPlayerName());
+        root.put("myPlayerId", localPlayerId != null ? localPlayerId.toString() : null);
 
-        // players
+        // Priority player UUID (derived from hasPriority flag on players)
+        UUID priorityPlayerId = null;
+        for (PlayerView pv : view.getPlayers()) {
+            if (pv.hasPriority()) {
+                priorityPlayerId = pv.getPlayerId();
+                break;
+            }
+        }
+        root.put("priorityPlayerId", priorityPlayerId != null ? priorityPlayerId.toString() : null);
+
+        // Playable card/ability UUIDs for the local player
+        List<String> canPlayIds = new ArrayList<>();
+        if (view.getCanPlayObjects() != null) {
+            for (UUID uid : view.getCanPlayObjects().getObjects().keySet()) {
+                canPlayIds.add(uid.toString());
+            }
+        }
+        root.put("canPlayIds", canPlayIds);
+
+        // Hand cards from this player's perspective (full details for local player)
+        CardsView myHand = view.getMyHand();
+
+        // Players
         List<Map<String, Object>> players = new ArrayList<>();
         for (PlayerView pv : view.getPlayers()) {
-            players.add(serializePlayer(pv, format));
+            boolean isLocal = localPlayerId != null && localPlayerId.equals(pv.getPlayerId());
+            players.add(serializePlayer(pv, format, isLocal ? myHand : null));
         }
         root.put("players", players);
 
-        // stack
+        // Stack
         List<Map<String, Object>> stack = new ArrayList<>();
         if (view.getStack() != null) {
             for (Map.Entry<UUID, CardView> entry : view.getStack().entrySet()) {
-                stack.add(serializeStackCard(entry.getValue()));
+                stack.add(serializeCard(entry.getValue()));
             }
         }
         root.put("stack", stack);
 
-        // local player's full hand (only visible to them)
-        root.put("myHand", serializeCardsView(view.getMyHand()));
+        // Pending query (set by WebSocket bridge when game waits for player input)
+        root.put("pendingQuery", pendingQuery);
 
         return GSON.toJson(root);
     }
 
-    private static Map<String, Object> serializePlayer(PlayerView pv, String format) {
+    /** @deprecated Use {@link #serialize(UUID, String, GameView, UUID)} instead. */
+    @Deprecated
+    public static String serialize(UUID gameId, String format, GameView view) {
+        return serialize(gameId, format, view, null, null);
+    }
+
+    // -----------------------------------------------------------------------
+    // Player
+    // -----------------------------------------------------------------------
+
+    private static Map<String, Object> serializePlayer(PlayerView pv, String format,
+                                                        CardsView handCards) {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("id", pv.getPlayerId() != null ? pv.getPlayerId().toString() : null);
         p.put("name", pv.getName());
@@ -64,7 +104,7 @@ public final class GameStateSerializer {
         p.put("isActive", pv.isActive());
         p.put("hasPriority", pv.hasPriority());
 
-        // mana pool
+        // Mana pool
         ManaPoolView mp = pv.getManaPool();
         if (mp != null) {
             Map<String, Integer> mana = new LinkedHashMap<>();
@@ -77,7 +117,22 @@ public final class GameStateSerializer {
             p.put("manaPool", mana);
         }
 
-        // battlefield
+        // Hand — full cards for local player, face-down placeholders for opponents
+        if (handCards != null) {
+            p.put("hand", serializeCardsView(handCards));
+        } else {
+            List<Map<String, Object>> faceDown = new ArrayList<>();
+            for (int i = 0; i < pv.getHandCount(); i++) {
+                Map<String, Object> fd = new LinkedHashMap<>();
+                fd.put("id", null);
+                fd.put("name", "Unknown");
+                fd.put("faceDown", true);
+                faceDown.add(fd);
+            }
+            p.put("hand", faceDown);
+        }
+
+        // Battlefield
         List<Map<String, Object>> battlefield = new ArrayList<>();
         if (pv.getBattlefield() != null) {
             for (Map.Entry<UUID, PermanentView> entry : pv.getBattlefield().entrySet()) {
@@ -86,13 +141,11 @@ public final class GameStateSerializer {
         }
         p.put("battlefield", battlefield);
 
-        // graveyard
+        // Graveyard / Exile
         p.put("graveyard", serializeCardsView(pv.getGraveyard()));
-
-        // exile
         p.put("exile", serializeCardsView(pv.getExile()));
 
-        // commander-specific fields (present for all formats; empty for non-Commander)
+        // Commander zone
         List<Map<String, Object>> commandZone = new ArrayList<>();
         if (pv.getCommandObjectList() != null) {
             for (CommandObjectView cov : pv.getCommandObjectList()) {
@@ -104,8 +157,7 @@ public final class GameStateSerializer {
         }
         p.put("commandZone", commandZone);
 
-        // commanderDamage is stored per-player in PlayerView counters; expose raw
-        // counter list so clients can extract COMMANDER_DAMAGE counters by name.
+        // Counters (includes commander damage)
         List<Map<String, Object>> counters = new ArrayList<>();
         if (pv.getCounters() != null) {
             for (CounterView cv : pv.getCounters()) {
@@ -120,41 +172,74 @@ public final class GameStateSerializer {
         return p;
     }
 
-    private static Map<String, Object> serializeStackCard(CardView cv) {
-        Map<String, Object> s = new LinkedHashMap<>();
-        s.put("id", cv.getId() != null ? cv.getId().toString() : null);
-        s.put("name", cv.getName());
-        // targets are embedded in the card's rules; expose them as a list via rules
-        List<String> rules = cv.getRules();
-        s.put("rules", rules != null ? rules : Collections.emptyList());
-        return s;
-    }
+    // -----------------------------------------------------------------------
+    // Cards (hand / graveyard / exile)
+    // -----------------------------------------------------------------------
 
     private static List<Map<String, Object>> serializeCardsView(CardsView cards) {
         List<Map<String, Object>> list = new ArrayList<>();
-        if (cards == null) {
-            return list;
-        }
+        if (cards == null) return list;
         for (Map.Entry<UUID, CardView> entry : cards.entrySet()) {
-            CardView cv = entry.getValue();
-            Map<String, Object> card = new LinkedHashMap<>();
-            card.put("id", cv.getId() != null ? cv.getId().toString() : null);
-            card.put("name", cv.getName());
-            card.put("rarity", cv.getRarity() != null ? cv.getRarity().toString() : null);
-            list.add(card);
+            list.add(serializeCard(entry.getValue()));
         }
         return list;
     }
 
+    static Map<String, Object> serializeCard(CardView cv) {
+        Map<String, Object> card = new LinkedHashMap<>();
+        card.put("id", cv.getId() != null ? cv.getId().toString() : null);
+        card.put("name", cv.getName());
+        card.put("manaCost", cv.getManaCostStr());
+
+        // Card types (Creature, Instant, Land, …)
+        List<String> types = new ArrayList<>();
+        if (cv.getCardTypes() != null) {
+            for (mage.constants.CardType t : cv.getCardTypes()) types.add(t.toString());
+        }
+        card.put("types", types);
+
+        // Super types (Legendary, Basic, Snow, …)
+        List<String> superTypes = new ArrayList<>();
+        if (cv.getSuperTypes() != null) {
+            for (mage.constants.SuperType st : cv.getSuperTypes()) superTypes.add(st.toString());
+        }
+        card.put("superTypes", superTypes);
+
+        // Sub types (Goblin, Island, Vampire, …)
+        List<String> subTypes = new ArrayList<>();
+        if (cv.getSubTypes() != null) {
+            for (mage.constants.SubType st : cv.getSubTypes()) subTypes.add(st.toString());
+        }
+        card.put("subTypes", subTypes);
+
+        card.put("power", cv.getPower());
+        card.put("toughness", cv.getToughness());
+        card.put("loyalty", cv.getLoyalty());
+        card.put("rules", cv.getRules() != null ? cv.getRules() : Collections.emptyList());
+        card.put("setCode", cv.getExpansionSetCode());
+        card.put("cardNumber", cv.getCardNumber());
+        card.put("rarity", cv.getRarity() != null ? cv.getRarity().toString() : null);
+        return card;
+    }
+
+    // -----------------------------------------------------------------------
+    // Permanents (battlefield)
+    // -----------------------------------------------------------------------
+
     private static Map<String, Object> serializePermanent(PermanentView pv) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("id", pv.getId() != null ? pv.getId().toString() : null);
-        p.put("name", pv.getName());
-        p.put("rarity", pv.getRarity() != null ? pv.getRarity().toString() : null);
+        Map<String, Object> p = serializeCard(pv);
         p.put("tapped", pv.isTapped());
-        p.put("power", pv.getPower());
-        p.put("toughness", pv.getToughness());
-        p.put("loyalty", pv.getLoyalty());
+        p.put("summoningSick", pv.hasSummoningSickness());
+
+        // Counters on the permanent (+1/+1, loyalty, etc.)
+        Map<String, Integer> counters = new LinkedHashMap<>();
+        if (pv.getCounters() != null) {
+            for (CounterView cv : pv.getCounters()) {
+                counters.merge(cv.getName(), cv.getCount(), Integer::sum);
+            }
+        }
+        if (!counters.isEmpty()) p.put("counters", counters);
+
         return p;
     }
 }

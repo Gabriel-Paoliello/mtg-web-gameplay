@@ -83,6 +83,17 @@ public class GameController implements GameCallback {
     private int turnsToRollback;
     private int requestsOpen;
 
+    /** External listeners notified each time the game fires a PlayerQueryEvent. */
+    public interface PlayerQueryListener {
+        void onPlayerQuery(UUID playerId, mage.game.events.PlayerQueryEvent event);
+    }
+    private final java.util.List<PlayerQueryListener> playerQueryListeners =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    public void addPlayerQueryListener(PlayerQueryListener listener) {
+        playerQueryListeners.add(listener);
+    }
+
     public GameController(ManagerFactory managerFactory, Game game, ConcurrentMap<UUID, UUID> userPlayerMap, UUID tableId, UUID choosingPlayerId, GameOptions gameOptions) {
         this.managerFactory = managerFactory;
         this.gameExecutor = managerFactory.threadExecutor().getGameExecutor();
@@ -236,6 +247,10 @@ public class GameController implements GameCallback {
                         }
                     } catch (MageException ex) {
                         logger.fatal("Player event listener error ", ex);
+                    }
+                    // Notify external listeners (e.g. WebSocket bridge)
+                    for (PlayerQueryListener l : playerQueryListeners) {
+                        try { l.onPlayerQuery(event.getPlayerId(), event); } catch (Exception ignored) {}
                     }
                 }
         );

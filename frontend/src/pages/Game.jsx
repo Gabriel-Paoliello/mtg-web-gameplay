@@ -7,16 +7,14 @@ import TurnIndicator from '../components/TurnIndicator'
 import ActionModal from '../components/ActionModal'
 import CommanderDamageMatrix from '../components/CommanderDamageMatrix'
 
-// Determine local player from the URL/session (first player by default)
-function useLocalPlayerId(players) {
+// Determine local player from the game state's myPlayerId field (set by serializer)
+function useLocalPlayerId(gameState) {
   const [localPlayerId, setLocalPlayerId] = useState(null)
   useEffect(() => {
-    if (players && players.length > 0 && !localPlayerId) {
-      // For now, assume we are the first player listed.
-      // A real implementation would track the assigned player from JOIN_GAME response.
-      setLocalPlayerId(players[0].id)
+    if (gameState?.myPlayerId && !localPlayerId) {
+      setLocalPlayerId(gameState.myPlayerId)
     }
-  }, [players, localPlayerId])
+  }, [gameState?.myPlayerId, localPlayerId])
   return [localPlayerId, setLocalPlayerId]
 }
 
@@ -33,7 +31,7 @@ export default function Game() {
 
   const isCommander = format === 'COMMANDER'
 
-  const [localPlayerId, setLocalPlayerId] = useLocalPlayerId(gameState?.players)
+  const [localPlayerId, setLocalPlayerId] = useLocalPlayerId(gameState)
   const [selectedCard, setSelectedCard] = useState(null)
   const [targets, setTargets] = useState([])
   const [localLifeOverrides, setLocalLifeOverrides] = useState({})
@@ -80,18 +78,26 @@ export default function Game() {
 
   const handleHandCardClick = useCallback((card) => {
     const isMyTurn = gameState?.priorityPlayerId === localPlayerId
-    if (!isMyTurn) return
-    send({ type: 'PLAY_CARD', payload: { cardId: card.id, targets: [] } })
+    if (!isMyTurn || !card?.id) return
+    // PLAY_CARD sends the card UUID as the XMage UUID response (priority)
+    send({ type: 'PLAY_CARD', data: card.id })
   }, [gameState, localPlayerId, send])
 
   const handleCommanderClick = useCallback((card) => {
     const isMyTurn = gameState?.priorityPlayerId === localPlayerId
-    if (!isMyTurn) return
-    send({ type: 'PLAY_CARD', payload: { cardId: card.id, targets: [] } })
+    if (!isMyTurn || !card?.id) return
+    send({ type: 'PLAY_CARD', data: card.id })
   }, [gameState, localPlayerId, send])
 
   const handleActionSubmit = useCallback((value) => {
-    send({ type: 'CHOOSE', payload: value })
+    if (typeof value === 'boolean') {
+      send({ type: 'SEND_BOOLEAN', data: value })
+    } else if (typeof value === 'string') {
+      // UUID or string choice
+      send({ type: 'SEND_UUID', data: value })
+    } else {
+      send({ type: 'CHOOSE', data: value })
+    }
   }, [send])
 
   const handleLifeChange = useCallback((playerId, delta) => {
@@ -186,14 +192,7 @@ export default function Game() {
               onCardClick={handleHandCardClick}
               onCommanderClick={handleCommanderClick}
               onLifeChange={handleLifeChange}
-              playableCardIds={
-                gameState?.priorityPlayerId === localPlayerId
-                  ? new Set([
-                      ...(localPlayer.hand?.map((c) => c.id) ?? []),
-                      ...(localPlayer.battlefield?.map((c) => c.id) ?? []),
-                    ])
-                  : new Set()
-              }
+              playableCardIds={new Set(gameState?.canPlayIds ?? [])}
               selectedCardId={selectedCard?.id}
               localPlayerId={localPlayerId}
             />
@@ -217,7 +216,7 @@ export default function Game() {
       <ActionModal
         waitingAction={waitingAction}
         onSubmit={handleActionSubmit}
-        onClose={null}
+        onClose={() => send({ type: 'PASS_PRIORITY' })}
       />
 
       {/* Game over overlay */}

@@ -8,6 +8,7 @@ export function useGameSocket() {
   const [connected, setConnected] = useState(false)
   const [waitingAction, setWaitingAction] = useState(null)
   const [gameOver, setGameOver] = useState(null)
+  const [userId, setUserId] = useState(null)
 
   const wsRef = useRef(null)
   const gameIdRef = useRef(null)
@@ -63,15 +64,29 @@ export function useGameSocket() {
         switch (message.type) {
           case 'GAME_CREATED':
             gameIdRef.current = message.gameId
+            if (message.userId) setUserId(message.userId)
             if (onGameCreated) onGameCreated(message.gameId)
             break
           case 'JOINED_GAME':
             gameIdRef.current = message.gameId
+            if (message.userId) setUserId(message.userId)
             if (onGameCreated) onGameCreated(message.gameId)
             break
           case 'GAME_STATE':
             setGameState(message.payload)
-            setWaitingAction(null)
+            // pendingQuery in the payload supersedes any separate WAITING_FOR_INPUT
+            if (message.payload?.pendingQuery) {
+              setWaitingAction(message.payload.pendingQuery)
+            } else {
+              setWaitingAction(null)
+            }
+            break
+          case 'WAITING_FOR_INPUT':
+            setWaitingAction({
+              queryType: message.queryType,
+              message: message.message,
+              validTargets: message.validTargets ?? [],
+            })
             break
           case 'PRIORITY':
             setGameState((prev) =>
@@ -153,6 +168,7 @@ export function useGameSocket() {
     connected,
     waitingAction,
     gameOver,
+    userId,
     connect,
     disconnect,
     send,

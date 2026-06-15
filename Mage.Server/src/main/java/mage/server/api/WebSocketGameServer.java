@@ -86,6 +86,12 @@ public class WebSocketGameServer extends WebSocketServlet {
     /** gameId (WS) -> polling executor */
     private static final ConcurrentHashMap<UUID, ScheduledExecutorService> gamePollers = new ConcurrentHashMap<>();
 
+    /** xmage playerId -> pending query info (last PlayerQueryEvent not yet answered) */
+    private static final ConcurrentHashMap<UUID, Map<String, Object>> pendingPlayerQuery = new ConcurrentHashMap<>();
+
+    /** xmage playerId -> xmage userId (reverse map for query notifications) */
+    private static final ConcurrentHashMap<UUID, UUID> xmagePlayerToUserId = new ConcurrentHashMap<>();
+
     /** short code (e.g. "AB12CD") -> wsGameId (UUID) */
     private static final ConcurrentHashMap<String, UUID> shortCodeToGame = new ConcurrentHashMap<>();
     /** wsGameId (UUID) -> short code */
@@ -121,17 +127,19 @@ public class WebSocketGameServer extends WebSocketServlet {
     // ------------------------------------------------------------------
 
     /**
-     * Push a serialized game state to all users watching a game.
+     * Push a serialized game state to a connected client.
      *
-     * @param gameId    the game UUID (WS key)
+     * @param gameId    the WS game UUID
      * @param gameView  fresh GameView for this user (one per player)
      * @param userId    the XMage userId to push to
+     * @param playerId  the XMage player UUID (identifies this player inside the game)
      */
-    public static void pushGameState(UUID gameId, GameView gameView, UUID userId) {
+    public static void pushGameState(UUID gameId, GameView gameView, UUID userId, UUID playerId) {
         Session wsSession = userSessions.get(userId);
         if (wsSession != null && wsSession.isOpen()) {
             String format = gameFormats.getOrDefault(gameId, "UNKNOWN");
-            String json = GameStateSerializer.serialize(gameId, format, gameView);
+            Map<String, Object> query = (playerId != null) ? pendingPlayerQuery.get(playerId) : null;
+            String json = GameStateSerializer.serialize(gameId, format, gameView, playerId, query);
             try {
                 wsSession.getRemote().sendString(
                         "{\"type\":\"GAME_STATE\",\"payload\":" + json + "}"
@@ -529,12 +537,24 @@ public class WebSocketGameServer extends WebSocketServlet {
         private void handleSendUUID(JsonObject msg) {
             GameController gc = resolveGameController(msg);
             if (gc == null) return;
-            if (!msg.has("data")) { sendError("Missing 'data' field"); return; }
+            // Accept "data" at top level OR "payload.cardId" / "payload.id" (from PLAY_CARD)
+            String rawUuid = null;
+            if (msg.has("data") && !msg.get("data").isJsonNull()) {
+                rawUuid = msg.get("data").getAsString();
+            } else if (msg.has("payload") && msg.get("payload").isJsonObject()) {
+                com.google.gson.JsonObject payload = msg.getAsJsonObject("payload");
+                if (payload.has("cardId")) rawUuid = payload.get("cardId").getAsString();
+                else if (payload.has("id"))  rawUuid = payload.get("id").getAsString();
+            }
+            if (rawUuid == null) { sendError("Missing 'data' or 'payload.cardId' field"); return; }
             try {
-                UUID data = UUID.fromString(msg.get("data").getAsString());
+                UUID data = UUID.fromString(rawUuid);
                 gc.sendPlayerUUID(userId, data);
+                // Clear any pending query for this player when they respond
+                UUID pid = userPlayerIdMap.get(userId);
+                if (pid != null) pendingPlayerQuery.remove(pid);
             } catch (IllegalArgumentException e) {
-                sendError("Invalid UUID in 'data': " + e.getMessage());
+                sendError("Invalid UUID: " + e.getMessage());
             }
         }
 
@@ -544,6 +564,8 @@ public class WebSocketGameServer extends WebSocketServlet {
             if (!msg.has("data")) { sendError("Missing 'data' field"); return; }
             boolean data = msg.get("data").getAsBoolean();
             gc.sendPlayerBoolean(userId, data);
+            UUID pid = userPlayerIdMap.get(userId);
+            if (pid != null) pendingPlayerQuery.remove(pid);
         }
 
         private void handleSendString(JsonObject msg) {
@@ -878,6 +900,45 @@ public class WebSocketGameServer extends WebSocketServlet {
                     t1.join(65000);
                     if (t2 != null) t2.join(65000);
                     logger.info("[WS] auto-start threads finished for wsGameId=" + wsGameId);
+
+                    // Register reverse player→user maps and PlayerQueryListener so the bridge
+                    // can forward "waiting for input" events to the correct WS client.
+                    if (playerId1 != null) xmagePlayerToUserId.put(playerId1, userId1);
+                    if (playerId2 != null && userId2 != null) xmagePlayerToUserId.put(playerId2, userId2);
+
+                    finalGc.addPlayerQueryListener((qPlayerId, event) -> {
+                        // Record the pending query so the next GAME_STATE push includes it
+                        Map<String, Object> q = new java.util.LinkedHashMap<>();
+                        q.put("queryType", event.getQueryType().toString());
+                        q.put("message", event.getMessage());
+
+                        java.util.List<String> validTargets = new java.util.ArrayList<>();
+                        if (event.getTargets() != null) {
+                            for (UUID t : event.getTargets()) validTargets.add(t.toString());
+                        }
+                        if (event.getPerms() != null) {
+                            for (mage.game.permanent.Permanent perm : event.getPerms())
+                                validTargets.add(perm.getId().toString());
+                        }
+                        if (!validTargets.isEmpty()) q.put("validTargets", validTargets);
+
+                        pendingPlayerQuery.put(qPlayerId, q);
+
+                        // Also push a lightweight WAITING_FOR_INPUT notification immediately
+                        UUID qUserId = xmagePlayerToUserId.get(qPlayerId);
+                        if (qUserId != null) {
+                            Session wsSession = userSessions.get(qUserId);
+                            if (wsSession != null && wsSession.isOpen()) {
+                                try {
+                                    com.google.gson.JsonObject notif = new com.google.gson.JsonObject();
+                                    notif.addProperty("type", "WAITING_FOR_INPUT");
+                                    notif.addProperty("queryType", event.getQueryType().toString());
+                                    notif.addProperty("message", event.getMessage() != null ? event.getMessage() : "");
+                                    wsSession.getRemote().sendString(notif.toString());
+                                } catch (Exception ignored) {}
+                            }
+                        }
+                    });
                 }
 
                 logger.info("[WS] Starting polling loop for wsGameId=" + wsGameId);
@@ -939,7 +1000,7 @@ public class WebSocketGameServer extends WebSocketServlet {
             try {
                 GameView view = mf.gameManager().getGameView(xmageGameId, playerId);
                 if (view != null) {
-                    pushGameState(wsGameId, view, userId);
+                    pushGameState(wsGameId, view, userId, playerId);
                 }
             } catch (Exception e) {
                 logger.warn("Failed to get/push GameView for userId=" + userId + ": " + e.getMessage());
