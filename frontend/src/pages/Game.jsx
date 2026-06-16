@@ -127,7 +127,15 @@ export default function Game() {
         <div className="flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-500'}`} />
           <span className="text-gray-500 text-xs">{connected ? 'Connected' : 'Disconnected'}</span>
-          <span className="text-gray-700 text-xs ml-2">Game: {gameId}</span>
+          <span className="text-gray-600 text-xs ml-2">Code:</span>
+          <span className="text-yellow-400 font-bold font-mono text-sm tracking-widest select-all">{gameId}</span>
+          <button
+            onClick={() => navigator.clipboard?.writeText(gameId)}
+            className="text-gray-600 hover:text-gray-400 text-xs border border-gray-700 rounded px-1.5 py-0.5"
+            title="Copy game code"
+          >
+            Copy
+          </button>
         </div>
         <button
           onClick={() => { disconnect(); navigate('/') }}

@@ -63,9 +63,9 @@ export default function Lobby() {
     }
 
     // Connect then send CREATE_GAME; server returns GAME_CREATED with real gameId
+    // Don't auto-navigate — show the code first so the user can share it
     connect(null, createMsg, (realGameId) => {
       setCreatedGameId(realGameId)
-      navigate(`/game/${realGameId}`, { state: { playerName, format } })
     })
   }
 
@@ -197,17 +197,36 @@ export default function Lobby() {
 
           {tab === 'create' ? (
             <div>
-              <button
-                onClick={handleCreate}
-                className="w-full py-3 bg-yellow-600 hover:bg-yellow-500 text-black font-bold rounded-lg
-                  text-sm transition-colors shadow-lg"
-              >
-                Create Game
-              </button>
-              {createdGameId && (
-                <div className="mt-3 p-3 bg-green-950 border border-green-800 rounded-lg text-center">
-                  <p className="text-green-400 text-sm mb-1">Game created! Share this code:</p>
-                  <p className="text-green-300 font-bold text-2xl tracking-widest">{createdGameId}</p>
+              {!createdGameId ? (
+                <button
+                  onClick={handleCreate}
+                  className="w-full py-3 bg-yellow-600 hover:bg-yellow-500 text-black font-bold rounded-lg
+                    text-sm transition-colors shadow-lg"
+                >
+                  Create Game
+                </button>
+              ) : (
+                <div className="mt-1 p-4 bg-green-950 border border-green-700 rounded-xl text-center space-y-3">
+                  <p className="text-green-400 text-sm font-medium">Game created! Share this code with your opponent:</p>
+                  <div className="flex items-center justify-center gap-3">
+                    <span className="text-green-200 font-bold text-4xl tracking-[0.3em] font-mono select-all">
+                      {createdGameId}
+                    </span>
+                    <button
+                      onClick={() => navigator.clipboard?.writeText(createdGameId)}
+                      className="text-green-600 hover:text-green-400 text-xs border border-green-800 rounded px-2 py-1"
+                      title="Copy code"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <p className="text-green-700 text-xs">Waiting for opponent to join...</p>
+                  <button
+                    onClick={() => navigate(`/game/${createdGameId}`, { state: { playerName, format } })}
+                    className="w-full py-2 bg-yellow-600 hover:bg-yellow-500 text-black font-bold rounded-lg text-sm"
+                  >
+                    Enter Game →
+                  </button>
                 </div>
               )}
             </div>
