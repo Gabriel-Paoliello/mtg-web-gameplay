@@ -94,6 +94,20 @@ public class GameController implements GameCallback {
         playerQueryListeners.add(listener);
     }
 
+    public interface GameEndedListener {
+        void onGameEnded(String message, UUID winnerId, String winnerName);
+    }
+    private final java.util.List<GameEndedListener> gameEndedListeners =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    public void addGameEndedListener(GameEndedListener listener) {
+        gameEndedListeners.add(listener);
+    }
+
+    public mage.game.Game getGame() {
+        return game;
+    }
+
     public GameController(ManagerFactory managerFactory, Game game, ConcurrentMap<UUID, UUID> userPlayerMap, UUID tableId, UUID choosingPlayerId, GameOptions gameOptions) {
         this.managerFactory = managerFactory;
         this.gameExecutor = managerFactory.threadExecutor().getGameExecutor();
@@ -779,6 +793,20 @@ public class GameController implements GameCallback {
     }
 
     public void endGame(final String message) throws MageException {
+        // Notify WebSocket bridge before sessions are torn down
+        UUID winnerId = null;
+        String winnerName = null;
+        for (mage.players.Player p : game.getPlayers().values()) {
+            if (p.hasWon()) {
+                winnerId = p.getId();
+                winnerName = p.getName();
+                break;
+            }
+        }
+        for (GameEndedListener l : gameEndedListeners) {
+            try { l.onGameEnded(message, winnerId, winnerName); } catch (Exception ignored) {}
+        }
+
         // send end game message/dialog
         for (final GameSessionPlayer gameSession : getGameSessions()) {
             gameSession.gameOver(message);

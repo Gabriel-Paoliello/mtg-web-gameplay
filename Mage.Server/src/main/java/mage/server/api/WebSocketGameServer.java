@@ -532,6 +532,21 @@ public class WebSocketGameServer extends WebSocketServlet {
             GameController gc = resolveGameController(msg);
             if (gc == null) return;
             gc.sendPlayerAction(action, userId, data);
+
+            // CONCEDE: if the conceding player is NOT the priority player, the game loop
+            // will only check the concede flag on the priority player's next response.
+            // Unblock that player now by sending a Boolean false (pass priority), so the
+            // game can process the concede immediately without waiting for manual input.
+            if (action == PlayerAction.CONCEDE) {
+                UUID concedingPlayerId = userPlayerIdMap.get(userId);
+                UUID priorityPlayerId = gc.getGame() != null ? gc.getGame().getPriorityPlayerId() : null;
+                if (priorityPlayerId != null && !priorityPlayerId.equals(concedingPlayerId)) {
+                    UUID priorityUserId = xmagePlayerToUserId.get(priorityPlayerId);
+                    if (priorityUserId != null) {
+                        gc.sendPlayerBooleanDirect(priorityUserId, false);
+                    }
+                }
+            }
         }
 
         private void handleSendUUID(JsonObject msg) {
@@ -937,6 +952,25 @@ public class WebSocketGameServer extends WebSocketServlet {
                                     wsSession.getRemote().sendString(notif.toString());
                                 } catch (Exception ignored) {}
                             }
+                        }
+                    });
+
+                    // Register GAME_OVER listener — fires before sessions are torn down
+                    finalGc.addGameEndedListener((endMsg, winnerId, winnerName) -> {
+                        for (Map.Entry<UUID, UUID> entry : userGameMap.entrySet()) {
+                            if (!wsGameId.equals(entry.getValue())) continue;
+                            Session wsSession = userSessions.get(entry.getKey());
+                            if (wsSession == null || !wsSession.isOpen()) continue;
+                            try {
+                                com.google.gson.JsonObject payload = new com.google.gson.JsonObject();
+                                if (winnerName != null) payload.addProperty("winner", winnerName);
+                                if (winnerId != null) payload.addProperty("winnerId", winnerId.toString());
+                                payload.addProperty("reason", endMsg != null ? endMsg : "Game ended");
+                                com.google.gson.JsonObject gameOverMsg = new com.google.gson.JsonObject();
+                                gameOverMsg.addProperty("type", "GAME_OVER");
+                                gameOverMsg.add("payload", payload);
+                                wsSession.getRemote().sendString(gameOverMsg.toString());
+                            } catch (Exception ignored) {}
                         }
                     });
                 }

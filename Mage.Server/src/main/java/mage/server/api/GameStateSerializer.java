@@ -38,13 +38,17 @@ public final class GameStateSerializer {
         root.put("priorityPlayerName", view.getPriorityPlayerName());
         root.put("myPlayerId", localPlayerId != null ? localPlayerId.toString() : null);
 
-        // Priority player UUID (derived from hasPriority flag on players)
+        // Priority player UUID — derived from hasPriority flag; fall back to activePlayerId
+        // (during untap step no player has the hasPriority flag set yet)
         UUID priorityPlayerId = null;
         for (PlayerView pv : view.getPlayers()) {
             if (pv.hasPriority()) {
                 priorityPlayerId = pv.getPlayerId();
                 break;
             }
+        }
+        if (priorityPlayerId == null) {
+            priorityPlayerId = view.getActivePlayerId();
         }
         root.put("priorityPlayerId", priorityPlayerId != null ? priorityPlayerId.toString() : null);
 
